@@ -143,7 +143,7 @@ func NewClient(ctx context.Context, pdAddrs []string, security config.Security, 
 	return &Client{
 		clusterID:   pdCli.GetClusterID(ctx),
 		regionCache: locate.NewRegionCache(pdCli),
-		pdClient:    pdCli,
+		pdClient:    locate.NewCodeCPDClient(pdCli),
 		rpcClient:   client.NewRPCClient(client.WithSecurity(security)),
 	}, nil
 }
@@ -167,9 +167,15 @@ func (c *Client) ClusterID() uint64 {
 	return c.clusterID
 }
 
+func encodeApiV2RawKey(key []byte) []byte {
+	newKey := []byte("r")
+	return append(newKey, key...)
+}
+
 // Get queries value with the key. When the key does not exist, it returns `nil, nil`.
 func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error) {
 	start := time.Now()
+	key = encodeApiV2RawKey(key)
 	defer func() { metrics.RawkvCmdHistogramWithGet.Observe(time.Since(start).Seconds()) }()
 
 	opts := c.getRawKVOptions(options...)
@@ -204,6 +210,9 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOpti
 	defer func() {
 		metrics.RawkvCmdHistogramWithBatchGet.Observe(time.Since(start).Seconds())
 	}()
+	for i, key := range keys {
+		keys[i] = encodeApiV2RawKey(key)
+	}
 
 	opts := c.getRawKVOptions(options...)
 	bo := retry.NewBackofferWithVars(ctx, rawkvMaxBackoff, nil)
@@ -235,6 +244,7 @@ func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, 
 	defer func() { metrics.RawkvCmdHistogramWithBatchPut.Observe(time.Since(start).Seconds()) }()
 	metrics.RawkvSizeHistogramWithKey.Observe(float64(len(key)))
 	metrics.RawkvSizeHistogramWithValue.Observe(float64(len(value)))
+	key = encodeApiV2RawKey(key)
 
 	if len(value) == 0 {
 		return errors.New("empty value is not supported")
@@ -266,6 +276,7 @@ func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, 
 func (c *Client) GetKeyTTL(ctx context.Context, key []byte, options ...RawOption) (*uint64, error) {
 	var ttl uint64
 	metrics.RawkvSizeHistogramWithKey.Observe(float64(len(key)))
+	key = encodeApiV2RawKey(key)
 
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(tikvrpc.CmdGetKeyTTL, &kvrpcpb.RawGetKeyTTLRequest{
@@ -310,6 +321,9 @@ func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttl
 	defer func() {
 		metrics.RawkvCmdHistogramWithBatchPut.Observe(time.Since(start).Seconds())
 	}()
+	for i, key := range keys {
+		keys[i] = encodeApiV2RawKey(key)
+	}
 
 	if len(keys) != len(values) {
 		return errors.New("the len of keys is not equal to the len of values")
@@ -332,6 +346,8 @@ func (c *Client) BatchPutWithTTL(ctx context.Context, keys, values [][]byte, ttl
 func (c *Client) Delete(ctx context.Context, key []byte, options ...RawOption) error {
 	start := time.Now()
 	defer func() { metrics.RawkvCmdHistogramWithDelete.Observe(time.Since(start).Seconds()) }()
+
+	key = encodeApiV2RawKey(key)
 
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(tikvrpc.CmdRawDelete, &kvrpcpb.RawDeleteRequest{
@@ -361,6 +377,10 @@ func (c *Client) BatchDelete(ctx context.Context, keys [][]byte, options ...RawO
 		metrics.RawkvCmdHistogramWithBatchDelete.Observe(time.Since(start).Seconds())
 	}()
 
+	for i, key := range keys {
+		keys[i] = encodeApiV2RawKey(key)
+	}
+
 	bo := retry.NewBackofferWithVars(ctx, rawkvMaxBackoff, nil)
 	opts := c.getRawKVOptions(options...)
 	resp, err := c.sendBatchReq(bo, keys, opts, tikvrpc.CmdRawBatchDelete)
@@ -388,6 +408,9 @@ func (c *Client) DeleteRange(ctx context.Context, startKey []byte, endKey []byte
 		}
 		metrics.TiKVRawkvCmdHistogram.WithLabelValues(label).Observe(time.Since(start).Seconds())
 	}()
+
+	startKey = encodeApiV2RawKey(startKey)
+	endKey = encodeApiV2RawKey(endKey)
 
 	// Process each affected region respectively
 	for !bytes.Equal(startKey, endKey) {
@@ -425,6 +448,8 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 	if limit > MaxRawKVScanLimit {
 		return nil, nil, errors.WithStack(ErrMaxScanLimitExceeded)
 	}
+	startKey = encodeApiV2RawKey(startKey)
+	endKey = encodeApiV2RawKey(endKey)
 
 	opts := c.getRawKVOptions(options...)
 
@@ -468,6 +493,9 @@ func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit
 	defer func() {
 		metrics.RawkvCmdHistogramWithRawReversScan.Observe(time.Since(start).Seconds())
 	}()
+
+	startKey = encodeApiV2RawKey(startKey)
+	endKey = encodeApiV2RawKey(endKey)
 
 	if limit > MaxRawKVScanLimit {
 		return nil, nil, errors.WithStack(ErrMaxScanLimitExceeded)
@@ -522,6 +550,7 @@ func (c *Client) CompareAndSwap(ctx context.Context, key, previousValue, newValu
 	if len(newValue) == 0 {
 		return nil, false, errors.New("empty value is not supported")
 	}
+	key = encodeApiV2RawKey(key)
 
 	opts := c.getRawKVOptions(options...)
 	reqArgs := kvrpcpb.RawCASRequest{
