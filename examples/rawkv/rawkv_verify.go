@@ -15,7 +15,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -40,6 +42,7 @@ var (
 	logLevel      string
 	cmdPut        bool
 	cmdVerify     bool
+	cmdFDTest     bool
 	paddingLen    int
 	padding       string
 )
@@ -51,6 +54,7 @@ const KEY_RANGE = 1e8
 func init() {
 	flag.BoolVar(&cmdPut, "put", false, "PUT workload")
 	flag.BoolVar(&cmdVerify, "verify", false, "VERIFY result")
+	flag.BoolVar(&cmdFDTest, "fdtest", false, "do fd test")
 	flag.StringVar(&pdMain, "main", "http://127.0.0.1:2379", "main cluster pd addr, default: http://127.0.0.1:2379")
 	flag.StringVar(&pdRecovery, "recovery", "http://127.0.0.1:2379", "secondary cluster pd addr, default: http://127.0.0.1:2379")
 	flag.Int64Var(&threads, "threads", 10, "# of threads")
@@ -178,6 +182,175 @@ func doVerify() {
 	wg.Wait()
 }
 
+func generateTestKeyValue(keyPrefix []byte, valPrefix []byte, seriNo int64) (string, string) {
+	key := fmt.Sprintf("%s_%d", keyPrefix, seriNo)
+	value := fmt.Sprintf("%s_%s", valPrefix, key)
+	return key, value
+}
+
+func generateTestBatchKeyValue(keyPrefix []byte, valPrefix []byte, startSeriNo int64, cnt int64) ([][]byte, [][]byte) {
+	var rawKeys [][]byte
+	var rawValues [][]byte
+	for i := startSeriNo; i < startSeriNo+cnt; i++ {
+		key, val := generateTestKeyValue(keyPrefix, valPrefix, i)
+		rawKeys = append(rawKeys, []byte(key))
+		rawValues = append(rawValues, []byte(val))
+	}
+	return rawKeys, rawValues
+}
+
+func putBatchKV(ctx context.Context, cli *rawkv.Client, keys [][]byte, vals [][]byte) error {
+	if len(keys) != len(vals) {
+		return errors.New("different key/val len")
+	}
+
+	for i := 0; i < len(keys); i++ {
+		err := cli.Put(ctx, keys[i], vals[i])
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func testRawPutGet(keyCnt int64) {
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cli, err := rawkv.NewClient(ctx, []string{pdMain}, config.DefaultConfig().Security)
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+	defer cancel()
+	for i := int64(0); i < keyCnt; i++ {
+		key, val := generateTestKeyValue([]byte("testRawPutGet"), []byte("value"), i)
+		err := cli.Put(ctx, []byte(key), []byte(val))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawPutGet put fail, cur index: %d.\n", i)
+			return
+		}
+	}
+
+	for i := int64(0); i < keyCnt; i++ {
+		key, val := generateTestKeyValue([]byte("testRawPutGet"), []byte("value"), i)
+		retVal, err := cli.Get(ctx, []byte(key))
+		if err != nil || string(retVal) != val {
+			fmt.Fprintf(os.Stderr, "testRawPutGet get fail, return %v, expect val:%v, return val:%v.\n", err, val, retVal)
+			return
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "testRawPutGet pass.\n")
+}
+
+func testRawBatchPutBatchGet() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cli, err := rawkv.NewClient(ctx, []string{pdMain}, config.DefaultConfig().Security)
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+	defer cancel()
+
+	start := int64(100)
+	batchCnt := int64(1000)
+
+	rawKeys, rawVals := generateTestBatchKeyValue([]byte("testRawBatchPutBatchGet"), []byte("value"), start, batchCnt)
+	err = cli.BatchPut(ctx, rawKeys, rawVals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawBatchPutBatchGet put fail.\n")
+		return
+	}
+
+	for i := int64(0); i < batchCnt; i++ {
+		retVal, err := cli.Get(ctx, rawKeys[i])
+		if err != nil || !bytes.Equal(retVal, rawVals[i]) {
+			fmt.Fprintf(os.Stderr, "testRawBatchPutBatchGet get fail, return %v, expect val:%v, return val:%v.\n", err, rawVals[i], retVal)
+			return
+		}
+	}
+
+	retVals, err := cli.BatchGet(ctx, rawKeys)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawBatchPutBatchGet get fail.\n")
+		return
+	}
+
+	for i := int64(0); i < batchCnt; i++ {
+		if !bytes.Equal(retVals[i], rawVals[i]) {
+			fmt.Fprintf(os.Stderr, "testRawBatchPutBatchGet get val fail, cur index: %d, expect:%s, ret:%s.\n",
+				i, rawVals[i], retVals[i])
+			return
+		}
+	}
+	fmt.Fprintf(os.Stdout, "testRawBatchPutBatchGet pass.\n")
+}
+
+func tesRawtCompareAndSwap() {
+	fmt.Fprintf(os.Stdout, "testRawBatchPutBatchGet not implemented.\n")
+}
+
+func testRawSameKeyWrite() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cli, err := rawkv.NewClient(ctx, []string{pdMain}, config.DefaultConfig().Security)
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+	defer cancel()
+
+	// preload some keys
+	start := int64(100)
+	batchCnt := int64(1000)
+	rawKeys, rawVals := generateTestBatchKeyValue([]byte("testRawSameKeyWrite"), []byte("value"), start, batchCnt)
+	err = cli.BatchPut(ctx, rawKeys, rawVals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawSameKeyWrite preload fail.\n")
+		return
+	}
+	// pick one key to write multi versions.
+	s := rand.NewSource(time.Now().UnixNano())
+	r := rand.New(s)
+	index := r.Int63n(batchCnt)
+	var midKey = rawKeys[index]
+	var midVal = rawVals[index]
+	var putVal = midVal
+	putCnt := r.Intn(200)
+	for i := 0; i < putCnt; i++ {
+		putVal = []byte(string(i) + string(midVal))
+		err := cli.Put(ctx, midKey, midVal)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawSameKeyWrite put fail, cur index: %d.\n", i)
+			return
+		}
+	}
+	retVal, err := cli.Get(ctx, midKey)
+	if err != nil || !bytes.Equal(putVal, retVal) {
+		fmt.Fprintf(os.Stderr, "testRawSameKeyWrite get val fail, expect:%s, ret:%s.\n", midVal, retVal)
+		return
+	}
+
+	fmt.Fprintf(os.Stdout, "testRawSameKeyWrite pass.\n")
+}
+
+func testRawKeyTTL() {
+
+}
+
+func testRawKeyMvcc() {
+
+}
+
+// include scan / reverse scan / batch scan
+func testRawScan() {
+
+}
+
+// include delete / batch delete / delete range
+func testRawDelete() {
+
+}
+
 func main() {
 	fmt.Printf("Value Base: %v\n", valueBase)
 
@@ -185,6 +358,9 @@ func main() {
 		doPut()
 	} else if cmdVerify {
 		doVerify()
+	} else if cmdFDTest {
+		testRawPutGet(100)
+		testRawBatchPutBatchGet()
 	} else {
 		fmt.Printf("Do PUT now.\n")
 		doPut()
