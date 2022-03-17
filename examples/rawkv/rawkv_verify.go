@@ -183,7 +183,7 @@ func doVerify() {
 }
 
 func generateTestKeyValue(keyPrefix []byte, valPrefix []byte, seriNo int64) (string, string) {
-	key := fmt.Sprintf("%s_%d", keyPrefix, seriNo)
+	key := fmt.Sprintf("%s_%08d", keyPrefix, seriNo)
 	value := fmt.Sprintf("%s_%s", valPrefix, key)
 	return key, value
 }
@@ -318,7 +318,7 @@ func testRawSameKeyWrite() {
 	putCnt := r.Intn(200)
 	for i := 0; i < putCnt; i++ {
 		putVal = []byte(string(i) + string(midVal))
-		err := cli.Put(ctx, midKey, midVal)
+		err := cli.Put(ctx, midKey, putVal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "testRawSameKeyWrite put fail, cur index: %d.\n", i)
 			return
@@ -326,7 +326,7 @@ func testRawSameKeyWrite() {
 	}
 	retVal, err := cli.Get(ctx, midKey)
 	if err != nil || !bytes.Equal(putVal, retVal) {
-		fmt.Fprintf(os.Stderr, "testRawSameKeyWrite get val fail, expect:%s, ret:%s.\n", midVal, retVal)
+		fmt.Fprintf(os.Stderr, "testRawSameKeyWrite get val fail: %v, expect:%s, ret:%s.\n", err, putVal, retVal)
 		return
 	}
 
@@ -334,21 +334,163 @@ func testRawSameKeyWrite() {
 }
 
 func testRawKeyTTL() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cli, err := rawkv.NewClient(ctx, []string{pdMain}, config.DefaultConfig().Security)
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+	defer cancel()
+	var keyCnt int64 = 1000
+	var ttl uint64 = 30
+	for i := int64(0); i < keyCnt; i++ {
+		key, val := generateTestKeyValue([]byte("testRawKeyTTL"), []byte("value"), i)
+		err := cli.PutWithTTL(ctx, []byte(key), []byte(val), ttl)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawKeyTTL put fail, cur index: %d.\n", i)
+			return
+		}
+	}
 
-}
+	for i := int64(0); i < keyCnt; i++ {
+		key, _ := generateTestKeyValue([]byte("testRawKeyTTL"), []byte("value"), i)
+		retTtl, err := cli.GetKeyTTL(ctx, []byte(key))
+		if err != nil || *retTtl > ttl {
+			fmt.Fprintf(os.Stderr, "testRawKeyTTL get fail, return %v, return val:%v.\n", err, *retTtl)
+			return
+		}
+	}
 
-func testRawKeyMvcc() {
-
+	fmt.Fprintf(os.Stdout, "testRawKeyTTL pass.\n")
 }
 
 // include scan / reverse scan / batch scan
 func testRawScan() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cli, err := rawkv.NewClient(ctx, []string{pdMain}, config.DefaultConfig().Security)
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+	defer cancel()
 
+	// preload some keys
+	start := int64(0)
+	batchCnt := int64(1000)
+	rawKeys, rawVals := generateTestBatchKeyValue([]byte("testRawScan"), []byte("value"), start, batchCnt)
+	err = cli.BatchPut(ctx, rawKeys, rawVals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawScan preload fail.\n")
+		return
+	}
+	rawKeys, rawVals = generateTestBatchKeyValue([]byte("testRawScan"), []byte("n_value"), start, batchCnt)
+	err = cli.BatchPut(ctx, rawKeys, rawVals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawScan preload fail.\n")
+		return
+	}
+
+	deleteStart := int64(900)
+	deleteEnd := int64(1001)
+	for i := deleteStart; i < deleteEnd; i++ {
+		deleteKey, _ := generateTestKeyValue([]byte("testRawScan"), []byte(""), i)
+		err := cli.Delete(ctx, []byte(deleteKey))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawScan delete fail, cur index: %d.\n", i)
+			return
+		}
+	}
+
+	scanStartKey, _ := generateTestKeyValue([]byte("testRawScan"), []byte(""), 0)
+	scanEndKey, _ := generateTestKeyValue([]byte("testRawScan"), []byte(""), 1000)
+	retKeys, retValues, err := cli.Scan(ctx, []byte(scanStartKey), []byte(scanEndKey), 1000)
+	if err != nil || len(retKeys[900]) != 0 {
+		fmt.Fprintf(os.Stderr, "testRawScan failed, %v.\n", err)
+		return
+	}
+	for i := 0; i < 900; i++ {
+		if !bytes.Equal(rawKeys[i], retKeys[i]) || !bytes.Equal(rawVals[i], retValues[i]) {
+			fmt.Fprintf(os.Stderr, "testRawScan get wrong key-value, cur index:%d. expect k: %s v: %s ret k: %s v: %s.\n",
+				i, rawKeys[i], rawVals[i], retKeys[i], retValues[i])
+			return
+		}
+	}
+
+	retKeys, retValues, err = cli.ReverseScan(ctx, []byte(scanEndKey), []byte(scanStartKey), 1000)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawScan failed, %v.\n", err)
+		return
+	}
+	for i := 0; i < 900; i++ {
+		if !bytes.Equal(rawKeys[899-i], retKeys[i]) || !bytes.Equal(rawVals[899-i], retValues[i]) {
+			fmt.Fprintf(os.Stderr, "testRawScan get wrong key-value, cur index:%d. expect k: %s v: %s ret k: %s v: %s.\n",
+				i, rawKeys[i], rawVals[i], retKeys[i], retValues[i])
+			return
+		}
+	}
+	fmt.Fprintf(os.Stdout, "testRawScan pass.\n")
 }
 
 // include delete / batch delete / delete range
 func testRawDelete() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cli, err := rawkv.NewClient(ctx, []string{pdMain}, config.DefaultConfig().Security)
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+	defer cancel()
 
+	// preload some keys
+	start := int64(100)
+	batchCnt := int64(1000)
+	rawKeys, rawVals := generateTestBatchKeyValue([]byte("testRawDelete"), []byte("value"), start, batchCnt)
+	err = cli.BatchPut(ctx, rawKeys, rawVals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "testRawDelete preload fail.\n")
+		return
+	}
+
+	deleteStart := int64(200)
+	deleteEnd := int64(500)
+	for i := deleteStart; i < deleteEnd; i++ {
+		deleteKey, _ := generateTestKeyValue([]byte("testRawDelete"), []byte(""), i)
+		err := cli.Delete(ctx, []byte(deleteKey))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawDelete delete fail, cur index: %d.\n", i)
+			return
+		}
+	}
+
+	for i := deleteStart; i < deleteEnd; i++ {
+		deleteKey, _ := generateTestKeyValue([]byte("testRawDelete"), []byte(""), i)
+		retVal, err := cli.Get(ctx, []byte(deleteKey))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawDelete delete fail, cur index: %d.\n", i)
+			return
+		}
+		if len(retVal) != 0 {
+			fmt.Fprintf(os.Stderr, "testRawDelete get non empty fail, cur index: %d.\n", i)
+			return
+		}
+	}
+
+	batchDeleteKeys, _ := generateTestBatchKeyValue([]byte("testRawDelete"), []byte(""), int64(600), int64(200))
+	err = cli.BatchDelete(ctx, batchDeleteKeys)
+	for i := int64(600); i < int64(800); i++ {
+		deleteKey, _ := generateTestKeyValue([]byte("testRawDelete"), []byte(""), i)
+		retVal, err := cli.Get(ctx, []byte(deleteKey))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "testRawDelete delete fail, cur index: %d.\n", i)
+			return
+		}
+		if len(retVal) != 0 {
+			fmt.Fprintf(os.Stderr, "testRawDelete get non empty fail, cur index: %d.\n", i)
+			return
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "testRawDelete pass.\n")
 }
 
 func main() {
@@ -359,8 +501,13 @@ func main() {
 	} else if cmdVerify {
 		doVerify()
 	} else if cmdFDTest {
-		testRawPutGet(100)
-		testRawBatchPutBatchGet()
+		/*
+			testRawPutGet(100)
+			testRawBatchPutBatchGet()
+			testRawSameKeyWrite()
+			testRawDelete()
+			testRawScan()*/
+		testRawKeyTTL()
 	} else {
 		fmt.Printf("Do PUT now.\n")
 		doPut()

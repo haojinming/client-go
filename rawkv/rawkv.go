@@ -173,6 +173,13 @@ func encodeApiV2RawKey(key []byte) []byte {
 	return append(newKey, key...)
 }
 
+func decodeApiV2RawKey(key []byte) []byte {
+	if len(key) == 0 {
+		return key
+	}
+	return key[1:]
+}
+
 // Get queries value with the key. When the key does not exist, it returns `nil, nil`.
 func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error) {
 	start := time.Now()
@@ -461,7 +468,7 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 
 	opts := c.getRawKVOptions(options...)
 
-	for len(keys) < limit && (len(endKey) == 0 || bytes.Compare(encodeStartKey, endKey) < 0) {
+	for len(keys) < limit && (len(encodeEndKey) == 0 || bytes.Compare(encodeStartKey, encodeEndKey) < 0) {
 		req := tikvrpc.NewRequest(tikvrpc.CmdRawScan, &kvrpcpb.RawScanRequest{
 			StartKey: encodeStartKey,
 			EndKey:   encodeEndKey,
@@ -479,7 +486,7 @@ func (c *Client) Scan(ctx context.Context, startKey, endKey []byte, limit int, o
 		}
 		cmdResp := resp.Resp.(*kvrpcpb.RawScanResponse)
 		for _, pair := range cmdResp.Kvs {
-			keys = append(keys, pair.Key)
+			keys = append(keys, decodeApiV2RawKey(pair.Key))
 			values = append(values, pair.Value)
 		}
 		encodeStartKey = loc.EndKey
@@ -531,7 +538,7 @@ func (c *Client) ReverseScan(ctx context.Context, startKey, endKey []byte, limit
 		}
 		cmdResp := resp.Resp.(*kvrpcpb.RawScanResponse)
 		for _, pair := range cmdResp.Kvs {
-			keys = append(keys, pair.Key)
+			keys = append(keys, decodeApiV2RawKey(pair.Key))
 			values = append(values, pair.Value)
 		}
 		encodeStartKey = loc.StartKey
