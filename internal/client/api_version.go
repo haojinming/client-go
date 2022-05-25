@@ -153,6 +153,12 @@ func EncodeRequest(req *tikvrpc.Request) (*tikvrpc.Request, error) {
 		r := *req.RawCompareAndSwap()
 		r.Key = EncodeV2Key(ModeRaw, r.Key)
 		newReq.Req = &r
+	case CmdRawChecksum:
+		r := *req.RawChecksum()
+		for _, keyRange := range r.Ranges {
+			keyRange.StartKey, keyRange.EndKey = EncodeV2Range(ModeRaw, keyRange.StartKey, keyRange.EndKey)
+		}
+		newReq.Req = &r
 	case CmdUnsafeDestroyRange:
 	case CmdRegisterLockObserver:
 	case CmdCheckLockObserver:
@@ -229,6 +235,7 @@ func DecodeResponse(req *tikvrpc.Request, resp *tikvrpc.Response) (*tikvrpc.Resp
 		r.Kvs, err = decodeV2Pairs(ModeRaw, r.Kvs)
 	case CmdGetKeyTTL:
 	case CmdRawCompareAndSwap:
+	case CmdRawChecksum:
 	case CmdUnsafeDestroyRange:
 	case CmdRegisterLockObserver:
 	case CmdCheckLockObserver:

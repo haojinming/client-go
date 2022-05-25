@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	cli, err := rawkv.NewClient(context.TODO(), []string{"127.0.0.1:2379"}, config.DefaultConfig().Security)
+	cli, err := rawkv.NewClientV2(context.TODO(), []string{"172.16.5.32:2379"}, config.DefaultConfig().Security)
 	if err != nil {
 		panic(err)
 	}
@@ -61,4 +61,10 @@ func main() {
 		panic(err)
 	}
 	fmt.Printf("found val: %s for key: %s\n", val, key)
+
+	crc64Xor, totalKvs, totalBytes, err := cli.Checksum(context.TODO(), []byte(""), []byte(""))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("checksum %d, %d, %d.\n", crc64Xor, totalKvs, totalBytes)
 }
