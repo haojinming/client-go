@@ -168,8 +168,10 @@ func (c *Client) ClusterID() uint64 {
 	return c.clusterID
 }
 
+var APIV2Prefix = [...]byte{'r', 0, 0, 0}
+
 func encodeApiV2RawKey(key []byte) []byte {
-	newKey := []byte("r")
+	newKey := APIV2Prefix[:]
 	return append(newKey, key...)
 }
 
@@ -177,7 +179,7 @@ func decodeApiV2RawKey(key []byte) []byte {
 	if len(key) == 0 {
 		return key
 	}
-	return key[1:]
+	return key[len(APIV2Prefix):]
 }
 
 // Get queries value with the key. When the key does not exist, it returns `nil, nil`.
