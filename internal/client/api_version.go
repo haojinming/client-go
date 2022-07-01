@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pkg/errors"
 	"github.com/tikv/client-go/v2/tikvrpc"
@@ -142,6 +143,16 @@ func EncodeRequest(req *tikvrpc.Request) (*tikvrpc.Request, error) {
 	case CmdRawCompareAndSwap:
 		r := *req.RawCompareAndSwap()
 		r.Key = EncodeV2Key(ModeRaw, r.Key)
+		newReq.Req = &r
+	case CmdRawChecksum:
+		oriReq := req.RawChecksum()
+		r := *oriReq
+		r.Ranges = make([]*kvrpcpb.KeyRange, 0, len(oriReq.Ranges))
+		for i := 0; i < len(oriReq.Ranges); i++ {
+			keyRange := *oriReq.Ranges[i]
+			keyRange.StartKey, keyRange.EndKey = EncodeV2Range(ModeRaw, keyRange.StartKey, keyRange.EndKey)
+			r.Ranges = append(r.Ranges, &keyRange)
+		}
 		newReq.Req = &r
 	}
 
