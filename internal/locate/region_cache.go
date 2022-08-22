@@ -40,6 +40,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/rand"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +54,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/test-infra/sdk/pkg/proxy"
 	"github.com/pkg/errors"
 	"github.com/stathat/consistent"
 	"github.com/tikv/client-go/v2/config"
@@ -67,6 +69,7 @@ import (
 	pd "github.com/tikv/pd/client"
 	atomic2 "go.uber.org/atomic"
 	"go.uber.org/zap"
+	netproxy "golang.org/x/net/proxy"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -2564,12 +2567,23 @@ func createKVHealthClient(ctx context.Context, addr string) (*grpc.ClientConn, h
 		}
 		opt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
+	grpcDialer := grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		dialer := proxy.GrpcProxyDialer()
+		switch dialer := dialer.(type) {
+		case netproxy.ContextDialer:
+			return dialer.DialContext(ctx, "tcp", addr)
+		default:
+			return dialer.Dial("tcp", addr)
+		}
+	})
+
 	keepAlive := cfg.TiKVClient.GrpcKeepAliveTime
 	keepAliveTimeout := cfg.TiKVClient.GrpcKeepAliveTimeout
 	conn, err := grpc.DialContext(
 		ctx,
 		addr,
 		opt,
+		grpcDialer,
 		grpc.WithInitialWindowSize(client.GrpcInitialWindowSize),
 		grpc.WithInitialConnWindowSize(client.GrpcInitialConnWindowSize),
 		grpc.WithConnectParams(grpc.ConnectParams{
